@@ -1,4 +1,3 @@
-
 ## Descripción
 
 Script para convertir entre coordenadas
@@ -7,6 +6,8 @@ Script para convertir entre coordenadas
 
 Para ejecutarlo requiere
 - Instalar python (comprobar si está instalado con `python --version` o `python3 --version`)
+- (Opcional) crear entorno virtual `python -m venv liftover_venv`
+- (Opcional) activar entorno virtual `source liftover_venv/bin/activate`
 - Instalar pip (comprobar si está instalado con `pip --version`)
 - Ejecutar el comando `pip install requirements.txt`
 - Ejecutar el script `python lifto.py -h` para ver los parámetros que acepta

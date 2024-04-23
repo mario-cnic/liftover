@@ -1,5 +1,4 @@
 liftover==1.2.2
-logging==0.4.9.6
 numpy==1.26.4
 pandas==2.2.2
 python-dateutil==2.9.0.post0
