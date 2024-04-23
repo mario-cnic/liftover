@@ -10,13 +10,31 @@ Para ejecutarlo requiere
 - (Opcional) activar entorno virtual `source liftover_venv/bin/activate`
 - Instalar pip (comprobar si está instalado con `pip --version`)
 - Ejecutar el comando `pip install requirements.txt`
+
+## Comandos
 - Ejecutar el script `python lifto.py -h` para ver los parámetros que acepta
+
+  -h, --help            show this help message and exit
+  --in_file IN_FILE     path to data
+  --old OLD             assembly to convert
+  --new NEW             new assembly
+  --one ONE             are the coordinates one based? Help: If an SNV has the same start and end is one based IF an insertion end = start+n_nucleotides is
+                        one_based Else is zero-based
+  --append_coords APPEND_COORDS
+                        When returning the data, do you want the substitute the original coord?
+  --show_err SHOW_ERR   print errors
+  --output_type OUTPUT_TYPE
+                        print errors
+  --lift_end LIFT_END   do you have end coord?
+
 - Ej: `python lifto.py --in_file 'ruta/a/mi/archivo.csv' --output_type 'csv'`
 
 Archivo de entrada -> archivo CSV con, al menos, los siguientes campos y con el siguiente nombre (cabecera)
 - CHROM -> cromosoma, da igual el formato (acepta chr1 y 1)
 - POS -> Posición o posición de inicio
-- END -> posición final (si no se dispone y no se necesita crear columna con valor 0 para todos los registros)
+- END -> posición final (si no se dispone y no se necesita se creará nueva columna)
+
+Por defecto guarda los resultados dentro de una nueva carpeta *out/*
 
 ## Aviso
 
