@@ -244,4 +244,4 @@ def main(args: list[str] | None):
 
 
 if __name__ == '__main__':
-    main()
+    main(None)
