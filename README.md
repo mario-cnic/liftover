@@ -22,17 +22,15 @@ Para ejecutarlo requiere
                         the same start and end is one based IF an insertion
                         end = start+n_nucleotides is one_based Else is zero-
                         based
-  --append_coords APPEND_COORDS
+  --override_coords OVERRIDE_COORDS
                         When returning the data, do you want to override the
                         original coords?
   --show_err SHOW_ERR   print errors
-  --output_type OUTPUT_TYPE
-                        csv(csv),pandas dataframe(df) or python
-                        dictionary(dict)
+  --output OUTPUT file
   --lift_end LIFT_END   do you have end coord?
 ```
 
-- Ej: `python lifto.py --in_file 'ruta/a/mi/archivo.csv' --output_type 'csv'`
+- Ej: `python lifto.py --in_file 'ruta/a/mi/archivo.csv' --output 'out.csv'`
 
 Archivo de entrada -> archivo CSV con, al menos, los siguientes campos y con el siguiente nombre (cabecera)
 - CHROM -> cromosoma, da igual el formato (acepta chr1 y 1)
