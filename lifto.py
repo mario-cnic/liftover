@@ -204,7 +204,7 @@ def lifto(data: str | pd.DataFrame, old: str = 'hg19', new: str = 'hg38',
 
     save_errors(result_dict, show_err, error, logger)
 
-    if output_file.endswith(('df', 'csv')):
+    if output_file.endswith(('df', 'csv', 'vcf')):
         # dict to dataframe wo proper colnames
         result = pd.DataFrame(result_dict).transpose()
         result.reset_index(inplace=True)
@@ -242,11 +242,30 @@ newcols={keys_as_cols + values_as_cols}')
             # result_merged.columns = map(lambda x: x.replace(f'_{new}', ''),
             #                             result_merged.columns.to_list())
 
-        if output_file == 'df':
+        if output_file.endswith('df'):
             return result_merged
         else:
             create_dir(output_file)
-            result_merged.to_csv(output_file, index=False)
+            if output_file.endswith('vcf'):
+                vcf_cols = [f'CHROM_{new}', f'POS_{new}', 'ID', 'REF', 'ALT', 'QUAL',
+                            'FILTER', 'INFO']
+                # FIX POSITIONS <-
+                result_merged.insert(2, 'ID', '.')
+                result_merged.insert(6, 'QUAL', '.')
+                result_merged.insert(7, 'FILTER', '.')
+                result_merged.insert(8, 'INFO', '.') 
+                vcf_df = result_merged.drop(columns={'END'}, inplace=False)  # type:pd.DataFrame
+                if not override_coords:
+                    vcf_df['INFO'] = f'GRC{old}='+vcf_df['CHROM'] + ':'+vcf_df['POS'].astype(str) +\
+                          '|'.join(vcf_df.columns.tolist()[9:]) +\
+                          vcf_df.loc[:, ~vcf_df.columns.isin(vcf_cols)].astype(str).agg(';'.join, axis=1)
+                    vcf_df.drop(vcf_df.iloc[:, 9: vcf_df.shape[1]+1], axis=1, inplace=True)
+                with open(output_file, 'w') as f:
+                    f.write('##fileformat=VCFv4.1\n#')
+                    f.write('\t'.join(vcf_cols)+'\n')
+                    vcf_df.to_csv(f, sep='\t', index=False, header=False)
+            else:
+                result_merged.to_csv(output_file, index=False)
 
             logger.info(f'File saved in {output_file}')
 
