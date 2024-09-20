@@ -6,8 +6,16 @@ from typing import Literal
 import os
 import argparse
 
+# logging definition -> Maybe this goes to main(?)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+# añadimos un handler para stdout
+c_handler = logging.StreamHandler(sys.stdout)
+c_format = logging.Formatter('%(name)s - %(levelname)s - %(message)s')
+c_handler.setFormatter(c_format)
+logger.addHandler(c_handler)
 
-def check_coords(pre_data: pd.DataFrame, logger: logging.Logger) -> bool:
+def check_coords(pre_data: pd.DataFrame) -> bool:
     """
     Check if coordinate system is 1-based o 0-based
     Based on SNV intervals
@@ -47,7 +55,6 @@ def enforce_col_types(data: pd.DataFrame):
 
 
 def check_columns_present(df: pd.DataFrame, required_cols: list[str],
-                          logger: logging.Logger,
                           required_are: int = 2) -> list[str]:
     """
     Check columns are present in dataframe
@@ -78,8 +85,7 @@ REF-ALT lengths''')
     return present
 
 
-def lift_coords(pre_data: pd.DataFrame, lifter,
-                logger: logging.Logger) -> tuple[dict[tuple:tuple],
+def lift_coords(pre_data: pd.DataFrame, lifter) -> tuple[dict[tuple:tuple],
                                                  list[tuple]]:
     """
     Iterates over a dataframe and lift the coordinates using `lifter` object
@@ -130,7 +136,7 @@ def lift_coords(pre_data: pd.DataFrame, lifter,
 
 
 def save_errors(data: dict, show_err: bool,
-                error: list, logger):
+                error: list):
     """Save not lifted variants.
     """
     if show_err and error:
@@ -142,12 +148,91 @@ def save_errors(data: dict, show_err: bool,
             f.write(f"{','.join(data)}\n")
             for value in error:
                 f.write(f"{','.join(map(str, value))}\n")
+        logger.info(f'Error file saved at {err_path}')
 
 
 def create_dir(f):
     directory = os.path.dirname(f)
     if not os.path.exists(directory):
         os.makedirs(directory)
+
+
+def write_as_vcf(data: pd.DataFrame, output_file: str,
+                 override: bool,
+                 old_assembly: str, new_assembly: str):
+    """Parse dataframe and saves an vcf
+
+    Params:
+    - data: dataframe
+    - output_file: path to output
+    - override: indicates if dataframe has old and new coords(FALSE) or only
+    new coords (TRUE)
+    - old_assembly: original assembly, only used if `override`=TRUE
+    - new_assembly: liftover target assembly, only used if `override`=TRUE
+    TODO: sort and compress (bgzip)
+    """
+    vcf_df = data.drop(columns={'END'}, inplace=False)  # type:pd.DataFrame
+    vcf_cols = ['CHROM', 'POS', 'ID', 'REF', 'ALT', 'QUAL',
+                'FILTER', 'INFO']
+    # INSERT COLUMNS
+    vcf_df.insert(2, 'ID', '.')
+    vcf_df.insert(5, 'QUAL', '.')
+    vcf_df.insert(6, 'FILTER', 'PASS')
+    vcf_df.insert(7, 'INFO', '.')
+    if not override:
+        vcf_df = vcf_df.drop(columns={'END_hg38'}, inplace=False)  # type:pd.DataFrame
+        logger.debug(vcf_df.shape[0])
+        # fix order (as CHROM_{new} is the target col, not CHROM)
+        colist = vcf_df.columns.to_list()
+        ch, ch_n = colist.index(f'CHROM_{new_assembly}'), colist.index('CHROM')
+        colist[ch], colist[ch_n] = colist[ch_n], colist[ch]
+
+        pos, pos_n = colist.index(f'POS_{new_assembly}'), colist.index('POS')
+        colist[pos], colist[pos_n] = colist[pos_n], colist[pos]
+        # assign new col order to df
+        vcf_df.columns = colist
+        # insert other info in INFO field
+        vcf_df['INFO'] = f'GRC{old_assembly}='+vcf_df['CHROM'] + ':'+vcf_df['POS'].astype(str)
+        vcf_df.drop(columns={'CHROM', 'POS',
+                             f'REF_{new_assembly}', f'ALT_{new_assembly}'}, inplace=True)  # REF=REF_NEW, redundant. Should be removed in previous step
+    colist = vcf_df.columns.to_list()
+    info_index = colist.index('INFO')
+    vcf_df.loc[:,'INFO'] = vcf_df.loc[:, 'INFO'] + ';OTHER='+'|'.join(colist[info_index+1:]) +\
+            vcf_df.iloc[:, info_index+1:].astype(str).agg(';'.join, axis=1)
+    vcf_df.drop(columns=vcf_df.columns[info_index+1:], inplace=True)
+    logger.debug(vcf_df.head())
+    # drop other columns
+    vcf_df.drop(vcf_df.iloc[:, len(vcf_cols): vcf_df.shape[1]+1], axis=1, inplace=True)
+    with open(output_file, 'w') as f:
+        f.write('''##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="placeholder, no info about the filtering">
+##contig=<ID=1,length=249167691>
+##contig=<ID=2,length=242695901>
+##contig=<ID=3,length=197800245>
+##contig=<ID=4,length=190915651>
+##contig=<ID=5,length=180666277>
+##contig=<ID=6,length=170877445>
+##contig=<ID=7,length=159086805>
+##contig=<ID=8,length=146293415>
+##contig=<ID=9,length=141018424>
+##contig=<ID=10,length=135434552>
+##contig=<ID=11,length=134938471>
+##contig=<ID=12,length=133763353>
+##contig=<ID=13,length=115045730>
+##contig=<ID=14,length=107285438>
+##contig=<ID=15,length=102369712>
+##contig=<ID=16,length=90141356>
+##contig=<ID=17,length=81006630>
+##contig=<ID=18,length=78014583>
+##contig=<ID=19,length=59071322>
+##contig=<ID=20,length=62906515>
+##contig=<ID=21,length=48077813>
+##contig=<ID=22,length=51156934>
+##contig=<ID=23,length=154847490>#''')
+        f.write('\t'.join(vcf_cols)+'\n')
+        vcf_df.to_csv(f, sep='\t', index=False, header=False)
+    logger.debug(vcf_df.shape[0])
+    logger.info('VCF file created succesfully')
 
 
 def lifto(data: str | pd.DataFrame, old: str = 'hg19', new: str = 'hg38',
@@ -174,14 +259,6 @@ def lifto(data: str | pd.DataFrame, old: str = 'hg19', new: str = 'hg38',
     Returns:
     - pd.DataFrame | dict | None
     """
-    # logging definition -> Maybe this goes to main(?)
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)
-    # añadimos un handler para stdout
-    c_handler = logging.StreamHandler(sys.stdout)
-    c_format = logging.Formatter('%(name)s - %(levelname)s - %(message)s')
-    c_handler.setFormatter(c_format)
-    logger.addHandler(c_handler)
 
     if isinstance(data, str):
         pre_data = pd.read_csv(data, header=0, sep=',')
@@ -189,20 +266,20 @@ def lifto(data: str | pd.DataFrame, old: str = 'hg19', new: str = 'hg38',
         pre_data = data
 
     columns = ['CHROM', 'POS', 'END', 'REF', 'ALT']
-    present_cols = check_columns_present(pre_data, columns, logger)
+    present_cols = check_columns_present(pre_data, columns)
     if present_cols == columns:
-        check_coords(pre_data, logger)
+        check_coords(pre_data)
 
     lifter = get_lifter(old, new, one_based=one_based)
     result_dict, error = lift_coords(pre_data.loc[:, present_cols],
-                                     lifter, logger)
+                                     lifter)
     logger.debug(list(result_dict.values())[:2])
     total = pre_data.shape[0]
     exito = len(result_dict)
     logger.info(f'Successfully converted: \
 {len(pre_data)} - {round(exito/total, 2)*100} %.')
 
-    save_errors(result_dict, show_err, error, logger)
+    save_errors(result_dict, show_err, error)
 
     if output_file.endswith(('df', 'csv', 'vcf')):
         # dict to dataframe wo proper colnames
@@ -247,23 +324,11 @@ newcols={keys_as_cols + values_as_cols}')
         else:
             create_dir(output_file)
             if output_file.endswith('vcf'):
-                vcf_cols = [f'CHROM_{new}', f'POS_{new}', 'ID', 'REF', 'ALT', 'QUAL',
-                            'FILTER', 'INFO']
-                # FIX POSITIONS <-
-                result_merged.insert(2, 'ID', '.')
-                result_merged.insert(6, 'QUAL', '.')
-                result_merged.insert(7, 'FILTER', '.')
-                result_merged.insert(8, 'INFO', '.') 
-                vcf_df = result_merged.drop(columns={'END'}, inplace=False)  # type:pd.DataFrame
-                if not override_coords:
-                    vcf_df['INFO'] = f'GRC{old}='+vcf_df['CHROM'] + ':'+vcf_df['POS'].astype(str) +\
-                          '|'.join(vcf_df.columns.tolist()[9:]) +\
-                          vcf_df.loc[:, ~vcf_df.columns.isin(vcf_cols)].astype(str).agg(';'.join, axis=1)
-                    vcf_df.drop(vcf_df.iloc[:, 9: vcf_df.shape[1]+1], axis=1, inplace=True)
-                with open(output_file, 'w') as f:
-                    f.write('##fileformat=VCFv4.1\n#')
-                    f.write('\t'.join(vcf_cols)+'\n')
-                    vcf_df.to_csv(f, sep='\t', index=False, header=False)
+                write_as_vcf(data=result_merged,
+                             output_file=output_file,
+                             old_assembly=old,
+                             new_assembly=new,
+                             override=override_coords)
             else:
                 result_merged.to_csv(output_file, index=False)
 
