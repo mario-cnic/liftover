@@ -86,7 +86,7 @@ REF-ALT lengths''')
 
 
 def lift_coords(pre_data: pd.DataFrame, lifter) -> tuple[dict[tuple:tuple],
-                                                 list[tuple]]:
+                                                         list[tuple]]:
     """
     Iterates over a dataframe and lift the coordinates using `lifter` object
 
@@ -124,6 +124,7 @@ def lift_coords(pre_data: pd.DataFrame, lifter) -> tuple[dict[tuple:tuple],
             else:
                 post_dict[keys] = (chrom, pos, end) if end != 0 else (chrom,
                                                                       pos)
+            logger.debug(f'{chrom}:{row.POS}- new:{pos}')
         except IndexError:
             error.append(tuple(keys))
             n = n+1
@@ -141,7 +142,8 @@ def save_errors(data: dict, show_err: bool,
     """
     if show_err and error:
         err_path = 'out/errors.txt'
-        os.mkdir('out/') if not os.path.isdir('out/') else 0
+        cwd = os.getcwd()
+        os.mkdir(cwd+'out/') if not os.path.isdir('out/') else 0
         logger.info(f'Failed a total of {len(error)},\
                     saving file in {err_path}')
         with open(err_path, 'w') as f:
@@ -179,31 +181,39 @@ def write_as_vcf(data: pd.DataFrame, output_file: str,
     vcf_df.insert(5, 'QUAL', '.')
     vcf_df.insert(6, 'FILTER', 'PASS')
     vcf_df.insert(7, 'INFO', '.')
-
     # CHANGE chr TODO
-    vcf_df['CHROM'] = vcf_df['CHROM'].str.replace('chr','')
+    vcf_df['CHROM'] = vcf_df['CHROM'].str.replace('chr', '')
     if not override:
-        vcf_df[f'CHROM_{new_assembly}'] = vcf_df[f'CHROM_{new_assembly}'].str.replace('chr','')
+        vcf_df[f'CHROM_{new_assembly}'] = vcf_df[f'CHROM_{new_assembly}'].str.replace('chr', '')
         vcf_df = vcf_df.drop(columns={'END_hg38'}, inplace=False)  # type:pd.DataFrame
         logger.debug(vcf_df.shape[0])
         # fix order (as CHROM_{new} is the target col, not CHROM)
         colist = vcf_df.columns.to_list()
         ch, ch_n = colist.index(f'CHROM_{new_assembly}'), colist.index('CHROM')
         colist[ch], colist[ch_n] = colist[ch_n], colist[ch]
-
+        # same with POS <-> POS_{new}
+        # logger.debug(vcf_df['POS'].head())
+        # logger.debug(vcf_df[f'POS_{new_assembly}'].head())
         pos, pos_n = colist.index(f'POS_{new_assembly}'), colist.index('POS')
         colist[pos], colist[pos_n] = colist[pos_n], colist[pos]
+        
         # assign new col order to df
-        vcf_df.columns = colist
+        vcf_df = vcf_df.reindex(columns=colist)
+        # logger.debug(vcf_df['POS'].head())
+        # logger.debug(vcf_df[f'POS_{new_assembly}'].head())
         # insert other info in INFO field
-        vcf_df['INFO'] = f'GRC{old_assembly}='+vcf_df['CHROM'] + ':'+vcf_df['POS'].astype(str)
+        # logger.debug(f'pos_{old_assembly}:{vcf_df.iloc[2, 1]}')
+        # logger.debug(f'pos_{new_assembly}:{vcf_df.loc[2,f"POS_{new_assembly}"]}')
+        vcf_df['INFO'] = f'GRC{old_assembly}='+ vcf_df['CHROM'] + ':'+vcf_df['POS'].astype(str)
         vcf_df.drop(columns={'CHROM', 'POS',
                              f'REF_{new_assembly}', f'ALT_{new_assembly}'}, inplace=True)  # REF=REF_NEW, redundant. Should be removed in previous step
     colist = vcf_df.columns.to_list()
     info_index = colist.index('INFO')
+    logger.debug(f'INFO is in {info_index} and POS_hg38 is in {colist.index("POS_hg38")}')
     vcf_df.loc[:,'INFO'] = vcf_df.loc[:, 'INFO'] + ';OTHER='+'|'.join(colist[info_index+1:]) +\
-            vcf_df.iloc[:, info_index+1:].astype(str).agg('|'.join, axis=1)
+                           vcf_df.iloc[:, info_index+1:].astype(str).agg('|'.join, axis=1)
     vcf_df.drop(columns=vcf_df.columns[info_index+1:], inplace=True)
+    logger.debug(vcf_df.columns.to_list())
     logger.debug(vcf_df.head())
     # drop other columns
     vcf_df.drop(vcf_df.iloc[:, len(vcf_cols): vcf_df.shape[1]+1], axis=1, inplace=True)
