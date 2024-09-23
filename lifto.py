@@ -179,7 +179,11 @@ def write_as_vcf(data: pd.DataFrame, output_file: str,
     vcf_df.insert(5, 'QUAL', '.')
     vcf_df.insert(6, 'FILTER', 'PASS')
     vcf_df.insert(7, 'INFO', '.')
+
+    # CHANGE chr TODO
+    vcf_df['CHROM'] = vcf_df['CHROM'].str.replace('chr','')
     if not override:
+        vcf_df[f'CHROM_{new_assembly}'] = vcf_df[f'CHROM_{new_assembly}'].str.replace('chr','')
         vcf_df = vcf_df.drop(columns={'END_hg38'}, inplace=False)  # type:pd.DataFrame
         logger.debug(vcf_df.shape[0])
         # fix order (as CHROM_{new} is the target col, not CHROM)
@@ -198,7 +202,7 @@ def write_as_vcf(data: pd.DataFrame, output_file: str,
     colist = vcf_df.columns.to_list()
     info_index = colist.index('INFO')
     vcf_df.loc[:,'INFO'] = vcf_df.loc[:, 'INFO'] + ';OTHER='+'|'.join(colist[info_index+1:]) +\
-            vcf_df.iloc[:, info_index+1:].astype(str).agg(';'.join, axis=1)
+            vcf_df.iloc[:, info_index+1:].astype(str).agg('|'.join, axis=1)
     vcf_df.drop(columns=vcf_df.columns[info_index+1:], inplace=True)
     logger.debug(vcf_df.head())
     # drop other columns
@@ -228,8 +232,13 @@ def write_as_vcf(data: pd.DataFrame, output_file: str,
 ##contig=<ID=20,length=62906515>
 ##contig=<ID=21,length=48077813>
 ##contig=<ID=22,length=51156934>
-##contig=<ID=23,length=154847490>#''')
-        f.write('\t'.join(vcf_cols)+'\n')
+##contig=<ID=X,length=154847490>
+##contig=<ID=Y,length=62460029>
+##contig=<ID=MT,length=16569>\n''')
+        if not override:
+            f.write(f'##INFO=<ID=GRC{old_assembly},Number=.,Type=String,Description="Coordinates in {old_assembly}">\n')
+        f.write('##INFO=<ID=OTHER,Number=.,Type=String,Description="Information included in original dataframe (maybe genotype) ">\n')
+        f.write('#'+'\t'.join(vcf_cols)+'\n')
         vcf_df.to_csv(f, sep='\t', index=False, header=False)
     logger.debug(vcf_df.shape[0])
     logger.info('VCF file created succesfully')
