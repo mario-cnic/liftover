@@ -5,6 +5,7 @@ import sys
 from typing import Literal
 import os
 import argparse
+from natsort import natsort_keygen
 
 # logging definition -> Maybe this goes to main(?)
 logger = logging.getLogger(__name__)
@@ -14,6 +15,7 @@ c_handler = logging.StreamHandler(sys.stdout)
 c_format = logging.Formatter('%(name)s - %(levelname)s - %(message)s')
 c_handler.setFormatter(c_format)
 logger.addHandler(c_handler)
+
 
 def check_coords(pre_data: pd.DataFrame) -> bool:
     """
@@ -74,7 +76,7 @@ def check_columns_present(df: pd.DataFrame, required_cols: list[str],
     missing = [c for c in required_cols if c not in df.columns]
     present = [c for c in required_cols if c in df.columns]
     if any([x in missing for x in essentials]):
-        raise IndexError(f"The following columns are missing\
+        raise IndexError(f"The following columns are missing \
 {', '.join(missing)}")
     elif missing:
         logger.warning(f'''The following columns are missing {missing}.
@@ -124,7 +126,7 @@ def lift_coords(pre_data: pd.DataFrame, lifter) -> tuple[dict[tuple:tuple],
             else:
                 post_dict[keys] = (chrom, pos, end) if end != 0 else (chrom,
                                                                       pos)
-            logger.debug(f'{chrom}:{row.POS}- new:{pos}')
+            # logger.debug(f'{chrom}:{row.POS}- new:{pos}')
         except IndexError:
             error.append(tuple(keys))
             n = n+1
@@ -159,9 +161,30 @@ def create_dir(f):
         os.makedirs(directory)
 
 
+def parse_format(format_col: str):
+    """Given a FORMAT string [GT:GQ:...] 
+    creates a string to parse the header"""
+    format_header = ''
+    format_col_list = format_col.split(':')
+    format_dict = {'GT': '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n',
+                   'GQ': '##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype Quality">\n',
+                   'DP': '##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read Depth">\n',
+                   'HQ': '##FORMAT=<ID=HQ,Number=2,Type=Integer,Description="Haplotype Quality">\n'}
+    for param in format_col_list:
+        try:
+            format_header = format_header + format_dict[param]
+            logger.info('Adding {param} to header')
+        except KeyError as e:
+            logger.warning(f'{param} not found in format dictionary, including a generic...')
+            generic = f'##FORMAT=<ID={param},Number=.,Type=String,Description="{param} from generic">\n'
+            format_header = format_header + generic
+    return format_header
+
+
 def write_as_vcf(data: pd.DataFrame, output_file: str,
                  override: bool,
-                 old_assembly: str, new_assembly: str):
+                 old_assembly: str, new_assembly: str, info_cols: str,
+                 format_col: str):
     """Parse dataframe and saves an vcf
 
     Params:
@@ -181,8 +204,17 @@ def write_as_vcf(data: pd.DataFrame, output_file: str,
     vcf_df.insert(5, 'QUAL', '.')
     vcf_df.insert(6, 'FILTER', 'PASS')
     vcf_df.insert(7, 'INFO', '.')
+    if format_col:
+        vcf_df.insert(8, 'FORMAT', '.')
+        vcf_cols.append('FORMAT')
     # CHANGE chr TODO
     vcf_df['CHROM'] = vcf_df['CHROM'].str.replace('chr', '')
+
+    logger.info('Removing `chr` string from CHROM column')
+
+    assembly_dict = {'hg19': 'GRCh37',
+                     'hg38': 'GRCh38'}
+
     if not override:
         vcf_df[f'CHROM_{new_assembly}'] = vcf_df[f'CHROM_{new_assembly}'].str.replace('chr', '')
         vcf_df = vcf_df.drop(columns={'END_hg38'}, inplace=False)  # type:pd.DataFrame
@@ -196,27 +228,50 @@ def write_as_vcf(data: pd.DataFrame, output_file: str,
         # logger.debug(vcf_df[f'POS_{new_assembly}'].head())
         pos, pos_n = colist.index(f'POS_{new_assembly}'), colist.index('POS')
         colist[pos], colist[pos_n] = colist[pos_n], colist[pos]
-        
+
         # assign new col order to df
         vcf_df = vcf_df.reindex(columns=colist)
-        # logger.debug(vcf_df['POS'].head())
-        # logger.debug(vcf_df[f'POS_{new_assembly}'].head())
-        # insert other info in INFO field
-        # logger.debug(f'pos_{old_assembly}:{vcf_df.iloc[2, 1]}')
-        # logger.debug(f'pos_{new_assembly}:{vcf_df.loc[2,f"POS_{new_assembly}"]}')
-        vcf_df['INFO'] = f'GRC{old_assembly}='+ vcf_df['CHROM'] + ':'+vcf_df['POS'].astype(str)
+
+        vcf_df['INFO'] = f'{assembly_dict[old_assembly]}=' + vcf_df['CHROM'] + ':'+vcf_df['POS'].astype(str)
         vcf_df.drop(columns={'CHROM', 'POS',
-                             f'REF_{new_assembly}', f'ALT_{new_assembly}'}, inplace=True)  # REF=REF_NEW, redundant. Should be removed in previous step
+                             f'REF_{new_assembly}', f'ALT_{new_assembly}'},
+                    inplace=True)  # REF=REF_NEW, redundant. Should be removed in previous step
     colist = vcf_df.columns.to_list()
     info_index = colist.index('INFO')
     logger.debug(f'INFO is in {info_index} and POS_hg38 is in {colist.index("POS_hg38")}')
-    vcf_df.loc[:,'INFO'] = vcf_df.loc[:, 'INFO'] + ';OTHER='+'|'.join(colist[info_index+1:]) +\
-                           vcf_df.iloc[:, info_index+1:].astype(str).agg('|'.join, axis=1)
-    vcf_df.drop(columns=vcf_df.columns[info_index+1:], inplace=True)
+    # add info_cols to new INFO field
+    nodropcols = ''
+    if info_cols:
+        nodropcols = info_cols.split(',')
+        for column in nodropcols:
+            vcf_df.loc[:, 'INFO'] = vcf_df.loc[:, 'INFO'] +\
+                f';{column}=' + vcf_df.loc[:, column]
+    # vcf_df.loc[:, 'INFO'] = vcf_df.loc[:, 'INFO'] + ';OTHER='+'|'.join(colist[info_index+1:]) +\
+    #                                                 vcf_df.iloc[:, info_index+1:].\
+    #                                                 astype(str).agg('|'.join, axis=1)
+    # vcf_df.drop(columns=vcf_df.columns[info_index+1:], inplace=True)
     logger.debug(vcf_df.columns.to_list())
     logger.debug(vcf_df.head())
-    # drop other columns
-    vcf_df.drop(vcf_df.iloc[:, len(vcf_cols): vcf_df.shape[1]+1], axis=1, inplace=True)
+    # drop other columns (Non essential and not specified as info or format columns)
+    # add format values
+    if format_col:
+        nodropcols = nodropcols + [format_col]
+        logger.debug(nodropcols)
+        vcf_df['FORMAT'] = vcf_df.loc[:, format_col]
+
+    if nodropcols:  # so messy, FIX
+        vcf_df.drop(vcf_df.iloc[:, len(vcf_cols): vcf_df.shape[1]+1], axis=1, inplace=True)
+        logger.info('Dropping none')
+    else:
+
+        vcf_df.drop(vcf_df.iloc[:, len(vcf_cols):], axis=1, inplace=True)
+        logger.info(f'Droping all columns but {vcf_cols}')
+
+    # sorting
+    logger.debug(vcf_df.columns[:2])
+    vcf_df.sort_values(by=vcf_df.columns[:2].to_list(), key=natsort_keygen(), axis=0, inplace=True)
+    logger.info('values sorted by CHROM and POS')
+
     with open(output_file, 'w') as f:
         f.write('''##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="placeholder, no info about the filtering">
@@ -246,8 +301,16 @@ def write_as_vcf(data: pd.DataFrame, output_file: str,
 ##contig=<ID=Y,length=62460029>
 ##contig=<ID=MT,length=16569>\n''')
         if not override:
-            f.write(f'##INFO=<ID=GRC{old_assembly},Number=.,Type=String,Description="Coordinates in {old_assembly}">\n')
-        f.write('##INFO=<ID=OTHER,Number=.,Type=String,Description="Information included in original dataframe (maybe genotype) ">\n')
+            f.write(f'##INFO=<ID={assembly_dict[old_assembly]},Number=.,Type=String,Description="Coordinates in {old_assembly}">\n')
+        # f.write('##INFO=<ID=OTHER,Number=.,Type=String,Description="Information included in original dataframe (maybe genotype) ">\n')
+        if info_cols:
+            for info in info_cols.split(','):
+                f.write(f'##INFO=<ID={info},Number=.,Type=String,Description="Column {info} from original dataframe">\n')
+                logger.info(f'Adding {info} to INFO header as type String')
+        if format_col:
+            format_header = parse_format(format_col)
+            f.write(format_header)
+            logger.info('FORMAT field added')
         f.write('#'+'\t'.join(vcf_cols)+'\n')
         vcf_df.to_csv(f, sep='\t', index=False, header=False)
     logger.debug(vcf_df.shape[0])
@@ -258,7 +321,8 @@ def lifto(data: str | pd.DataFrame, old: str = 'hg19', new: str = 'hg38',
           one_based: bool = False, override_coords: bool = True,
           lift_end: bool = True, show_err: bool = False,
           output_file: Literal['dict', 'df', 'csv'] = 'df',
-          remove_missing: bool = True) -> (pd.DataFrame | dict | None):
+          remove_missing: bool = True, info_cols: str = '',
+          format_col: str = '') -> (pd.DataFrame | dict | None):
     """
     MAIN
 
@@ -280,7 +344,8 @@ def lifto(data: str | pd.DataFrame, old: str = 'hg19', new: str = 'hg38',
     """
 
     if isinstance(data, str):
-        pre_data = pd.read_csv(data, header=0, sep=',')
+        sep = '\t' if data.endswith('.tsv') else ','
+        pre_data = pd.read_csv(data, header=0, sep=sep)
     else:
         pre_data = data
 
@@ -347,7 +412,9 @@ newcols={keys_as_cols + values_as_cols}')
                              output_file=output_file,
                              old_assembly=old,
                              new_assembly=new,
-                             override=override_coords)
+                             override=override_coords,
+                             info_cols=info_cols,
+                             format_col=format_col)
             else:
                 result_merged.to_csv(output_file, index=False)
 
@@ -367,8 +434,10 @@ def argparsing(args: list[str] | None):
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--in_file', type=str,
+    parser.add_argument('--input', type=str,
                         help='path to data')
+    parser.add_argument('--output', type=str,
+                        help='''''')
     parser.add_argument('--old', type=str,
                         help='assembly to convert', default='hg19')
     parser.add_argument('--new', type=str,
@@ -387,10 +456,14 @@ the original coords?',
                         default=False)
     parser.add_argument('--show_err', type=bool,
                         help='print errors', default=False)
-    parser.add_argument('--output', type=str,
-                        help='''''')
     parser.add_argument('--lift_end', type=bool,
                         help='do you have end coord?', default=False)
+    parser.add_argument('--add_info_fields', type=str,
+                        help="only if output is vcf.\
+Which columns do you want to include in the INFO field\
+Eg: --add_info_fields samplegenotype,quality will include these two columns")
+    parser.add_argument('--format_column', type=str,
+                        help='Indicate FORMAT field to use. Only for VCF output.')
 
     return parser.parse_args(args)
 
@@ -398,10 +471,16 @@ the original coords?',
 def main(args: list[str] | None):
     parser = argparsing(args)
 
-    lifto(parser.in_file, old=parser.old, new=parser.new,
+    lifto(data=parser.input,
+          old=parser.old,
+          new=parser.new,
           override_coords=parser.override_coords,
-          output_file=parser.output, show_err=parser.show_err,
-          lift_end=parser.lift_end)
+          output_file=parser.output,
+          show_err=parser.show_err,
+          lift_end=parser.lift_end,
+          info_cols=parser.add_info_fields,
+          format_col=parser.format_column
+          )
 
 
 if __name__ == '__main__':
