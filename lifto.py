@@ -17,6 +17,10 @@ c_handler.setFormatter(c_format)
 logger.addHandler(c_handler)
 
 
+ASSEMBLY = {'hg19': 'GRCh37',
+            'hg38': 'GRCh38'}
+
+
 def check_coords(pre_data: pd.DataFrame) -> bool:
     """
     Check if coordinate system is 1-based o 0-based
@@ -181,6 +185,68 @@ def parse_format(format_col: str):
     return format_header
 
 
+def reorder_lifted_coords(vcf_df: pd.DataFrame,
+                          new_assembly: str,
+                          old_assembly: str) -> pd.DataFrame:
+    """Helper function to undo the mess coming y
+    from the lifted dataframe"""
+    # fix order (as CHROM_{new} is the target col, not CHROM)
+    colist = vcf_df.columns.to_list()
+    ch, ch_n = colist.index(f'CHROM_{new_assembly}'), colist.index('CHROM')
+    colist[ch], colist[ch_n] = colist[ch_n], colist[ch]
+    # same with POS <-> POS_{new}
+    # logger.debug(vcf_df['POS'].head())
+    # logger.debug(vcf_df[f'POS_{new_assembly}'].head())
+    pos, pos_n = colist.index(f'POS_{new_assembly}'), colist.index('POS')
+    colist[pos], colist[pos_n] = colist[pos_n], colist[pos]
+
+    # assign new col order to df
+    vcf_df = vcf_df.reindex(columns=colist)
+
+    vcf_df['INFO'] = f'{ASSEMBLY[old_assembly]}=' + vcf_df['CHROM'] + ':'+vcf_df['POS'].astype(str)
+    vcf_df.drop(columns={'CHROM', 'POS',
+                             f'REF_{new_assembly}', f'ALT_{new_assembly}'},
+                    inplace=True)  # REF=REF_NEW, redundant. Should be removed in previous step
+    logger.info('Old assembly coords added to INFO field')
+    return vcf_df
+
+def reorder_lifted_2(data: pd.DataFrame,
+                     new: str, old: str) -> pd.DataFrame:
+    """
+    Modify the DataFrame so that CHROM_hg38 and POS_hg38 become the new CHROM and POS,
+    and the old CHROM and POS are renamed to CHROM_hg19 and POS_hg19 (or any specified old assembly).
+
+    Args:
+        - data: DataFrame containing 'CHROM', 'POS', 'CHROM_hg38', 'POS_hg38'.
+        - new: Name of the new assembly (e.g., 'hg38').
+        - old: Name of the old assembly (e.g., 'hg19').
+
+    Returns:
+        - Modified DataFrame with updated column names.
+    """
+
+    data.rename(columns={
+        'CHROM': f'CHROM_{old}',
+        'POS': F'POS_{old}'}, inplace=True)
+
+    # Rename CHROM_hg38 and POS_hg38 to CHROM and POS
+    data.rename(columns={
+        f'CHROM_{new}': 'CHROM',
+        f'POS_{new}': 'POS'
+    }, inplace=True)
+
+    data['INFO'] = f'{ASSEMBLY[old]}=' + data[f'CHROM_{old}'] + ':'+data[f'POS_{old}'].astype(str)
+    data.drop(columns={f'CHROM_{old}',
+                       f'POS_{old}',
+                       f'REF_{new}',
+                       f'ALT_{new}'},
+              inplace=True)  # REF=REF_NEW, redundant
+    logger.info('Old assembly coords added to INFO field')
+    logger.debug(f'Columns in df are {data.columns}')
+
+    return data
+
+
 def write_as_vcf(data: pd.DataFrame, output_file: str,
                  override: bool,
                  old_assembly: str, new_assembly: str, info_cols: str,
@@ -196,7 +262,10 @@ def write_as_vcf(data: pd.DataFrame, output_file: str,
     - new_assembly: liftover target assembly, only used if `override`=TRUE
     TODO: sort and compress (bgzip)
     """
-    vcf_df = data.drop(columns={'END'}, inplace=False)  # type:pd.DataFrame
+
+    vcf_df = data.drop(columns={'END'}, inplace=False, errors='ignore')  # type:pd.DataFrame
+    vcf_df = vcf_df.drop(columns={'END_hg38'}, inplace=False, errors='ignore')  # type:pd.DataFrame
+
     vcf_cols = ['CHROM', 'POS', 'ID', 'REF', 'ALT', 'QUAL',
                 'FILTER', 'INFO']
     # INSERT COLUMNS
@@ -205,76 +274,66 @@ def write_as_vcf(data: pd.DataFrame, output_file: str,
     vcf_df.insert(6, 'FILTER', 'PASS')
     vcf_df.insert(7, 'INFO', '.')
     if format_col:
-        vcf_df.insert(8, 'FORMAT', '.')
+        vcf_df.insert(8, 'FORMAT', format_col)  # not fine
+        logger.info(f'Added FORMAT field using column name = {format_col}')
         vcf_cols.append('FORMAT')
+        # TODO: add one column per sample instead of including all in one column
+        vcf_cols.append('SAMPLES')  # fix
+
     # CHANGE chr TODO
     vcf_df['CHROM'] = vcf_df['CHROM'].str.replace('chr', '')
-
     logger.info('Removing `chr` string from CHROM column')
-
-    assembly_dict = {'hg19': 'GRCh37',
-                     'hg38': 'GRCh38'}
 
     if not override:
         vcf_df[f'CHROM_{new_assembly}'] = vcf_df[f'CHROM_{new_assembly}'].str.replace('chr', '')
-        vcf_df = vcf_df.drop(columns={'END_hg38'}, inplace=False)  # type:pd.DataFrame
-        logger.debug(vcf_df.shape[0])
-        # fix order (as CHROM_{new} is the target col, not CHROM)
-        colist = vcf_df.columns.to_list()
-        ch, ch_n = colist.index(f'CHROM_{new_assembly}'), colist.index('CHROM')
-        colist[ch], colist[ch_n] = colist[ch_n], colist[ch]
-        # same with POS <-> POS_{new}
-        # logger.debug(vcf_df['POS'].head())
-        # logger.debug(vcf_df[f'POS_{new_assembly}'].head())
-        pos, pos_n = colist.index(f'POS_{new_assembly}'), colist.index('POS')
-        colist[pos], colist[pos_n] = colist[pos_n], colist[pos]
 
-        # assign new col order to df
-        vcf_df = vcf_df.reindex(columns=colist)
+        vcf_df = reorder_lifted_2(vcf_df,
+                                  new=new_assembly,
+                                  old=old_assembly)
 
-        vcf_df['INFO'] = f'{assembly_dict[old_assembly]}=' + vcf_df['CHROM'] + ':'+vcf_df['POS'].astype(str)
-        vcf_df.drop(columns={'CHROM', 'POS',
-                             f'REF_{new_assembly}', f'ALT_{new_assembly}'},
-                    inplace=True)  # REF=REF_NEW, redundant. Should be removed in previous step
-    colist = vcf_df.columns.to_list()
-    info_index = colist.index('INFO')
-    logger.debug(f'INFO is in {info_index} and POS_hg38 is in {colist.index("POS_hg38")}')
+    # colist = vcf_df.columns.to_list()
+    # info_index = colist.index('INFO')
+    # logger.debug(f'INFO is in {info_index} and POS_hg38 is in {colist.index("POS_hg38")}')
     # add info_cols to new INFO field
     nodropcols = ''
     if info_cols:
         nodropcols = info_cols.split(',')
-        for column in nodropcols:
-            vcf_df.loc[:, 'INFO'] = vcf_df.loc[:, 'INFO'] +\
-                f';{column}=' + vcf_df.loc[:, column]
-    # vcf_df.loc[:, 'INFO'] = vcf_df.loc[:, 'INFO'] + ';OTHER='+'|'.join(colist[info_index+1:]) +\
-    #                                                 vcf_df.iloc[:, info_index+1:].\
-    #                                                 astype(str).agg('|'.join, axis=1)
-    # vcf_df.drop(columns=vcf_df.columns[info_index+1:], inplace=True)
+        for i, column in enumerate(nodropcols):
+            # replace invalid characters
+            vcf_df.loc[:, column] = vcf_df.loc[:, column].str.replace(' ','_')
+            # vcf_df.loc[:, column] = vcf_df.loc[:, column].str.replace(':',',')
+            vcf_df.loc[:, column] = vcf_df.loc[:, column].str.replace(';',',')
+            if i == 0:  # workaround..FIX
+                vcf_df.loc[:, 'INFO'] = f'{column}=' + vcf_df.loc[:, column]
+            else:
+                vcf_df.loc[:, 'INFO'] = vcf_df.loc[:, 'INFO'] +\
+                    f';{column}=' + vcf_df.loc[:, column]
     logger.debug(vcf_df.columns.to_list())
     logger.debug(vcf_df.head())
     # drop other columns (Non essential and not specified as info or format columns)
     # add format values
     if format_col:
-        nodropcols = nodropcols + [format_col]
+        nodropcols = nodropcols + [format_col, 'SAMPLES']
         logger.debug(nodropcols)
-        vcf_df['FORMAT'] = vcf_df.loc[:, format_col]
+        vcf_df['SAMPLES'] = vcf_df.loc[:, format_col]
+        logger.info('Added SAMPLES field using format column values provided')
 
-    if nodropcols:  # so messy, FIX
-        vcf_df.drop(vcf_df.iloc[:, len(vcf_cols): vcf_df.shape[1]+1], axis=1, inplace=True)
-        logger.info('Dropping none')
-    else:
-
-        vcf_df.drop(vcf_df.iloc[:, len(vcf_cols):], axis=1, inplace=True)
-        logger.info(f'Droping all columns but {vcf_cols}')
+    # ordering and dropping columns
+    vcf_df = vcf_df[vcf_cols]
+    logger.info(f'''Droping all columns but {vcf_df.columns}\n
+{nodropcols} included in INFO field''')
 
     # sorting
     logger.debug(vcf_df.columns[:2])
-    vcf_df.sort_values(by=vcf_df.columns[:2].to_list(), key=natsort_keygen(), axis=0, inplace=True)
+    vcf_df.sort_values(by=vcf_df.columns[:2].to_list(),
+                       key=natsort_keygen(),
+                       axis=0,
+                       inplace=True)
     logger.info('values sorted by CHROM and POS')
 
     with open(output_file, 'w') as f:
         f.write('''##fileformat=VCFv4.2
-##FILTER=<ID=PASS,Description="placeholder, no info about the filtering">
+##FILTER=<ID=PASS,Description="All filters passed (placeholder)">
 ##contig=<ID=1,length=249167691>
 ##contig=<ID=2,length=242695901>
 ##contig=<ID=3,length=197800245>
@@ -301,7 +360,7 @@ def write_as_vcf(data: pd.DataFrame, output_file: str,
 ##contig=<ID=Y,length=62460029>
 ##contig=<ID=MT,length=16569>\n''')
         if not override:
-            f.write(f'##INFO=<ID={assembly_dict[old_assembly]},Number=.,Type=String,Description="Coordinates in {old_assembly}">\n')
+            f.write(f'##INFO=<ID={ASSEMBLY[old_assembly]},Number=.,Type=String,Description="Coordinates in {old_assembly}">\n')
         # f.write('##INFO=<ID=OTHER,Number=.,Type=String,Description="Information included in original dataframe (maybe genotype) ">\n')
         if info_cols:
             for info in info_cols.split(','):
@@ -310,7 +369,7 @@ def write_as_vcf(data: pd.DataFrame, output_file: str,
         if format_col:
             format_header = parse_format(format_col)
             f.write(format_header)
-            logger.info('FORMAT field added')
+            logger.info('FORMAT field added to HEADER')
         f.write('#'+'\t'.join(vcf_cols)+'\n')
         vcf_df.to_csv(f, sep='\t', index=False, header=False)
     logger.debug(vcf_df.shape[0])
