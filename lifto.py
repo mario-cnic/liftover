@@ -183,11 +183,6 @@ def save_errors(error: list, output_file: str):
         f"Failed a total of {len(error)}, saving file to {err_path}"
     )
     with open(err_path, "w") as f:
-        try:
-            # write to file the error list
-            f.write(f"{','.join(error)}\n")
-        except TypeError as e:
-            logger.error(f"Error writing to error file: {e}")
         for value in error:
             f.write(f"{','.join(map(str, value))}\n")
     logger.info(f"Error file saved at {err_path}")
@@ -502,7 +497,8 @@ def parse_genotype(format_col, vcf_df, samples_dict):
                       "Homozygous_alt": "1/1", "Heterozygous_": "0/1",
                       "Heterozygous": "0/1", "Homozygous_ref_": "0/0",
                       "Homozygosis": "1/1", "Homozygosis_ref": "0/0",
-                      "Homozygosis_alt": "1/1", "Heterozygosis": "0/1",}
+                      "Homozygosis_alt": "1/1", "Heterozygosis": "0/1","Hemizygosis": "0/1",
+                      "Homozygosis_": "1/1"}
         if any(value.lower() not in GT_MAPPING.values() for value in genotype_values):
             logger.debug(f"Converting {genotype_values} to {GT_MAPPING}")
                 # replace the values in the genotype_col using the provided dictionary mapping
