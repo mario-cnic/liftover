@@ -359,6 +359,7 @@ def write_as_vcf(
         logger.info(f"Added FORMAT field = {format_col}")
         # append to list in given position
         samples_dict = parse_samples(samples,format_col)
+        vcf_df = parse_genotype(format_col, vcf_df, samples_dict)
         insert_sample_values(vcf_df, samples_dict, vcf_cols)
     elif not format_col and samples:
         logger.error(
@@ -418,7 +419,7 @@ def write_as_vcf(
 
     # ordering and dropping columns
     vcf_df = vcf_df[vcf_cols]
-    logger.info(f"""Droping all columns but {vcf_df.columns}\n
+    logger.debug(f"""Droping all columns but {vcf_df.columns}\n
 {nondropcols} included in INFO field""")
 
     # sorting
@@ -475,6 +476,47 @@ def write_as_vcf(
         vcf_df.to_csv(f, sep="\t", index=False, header=False)
     logger.debug(vcf_df.shape[0])
     logger.info(f"VCF file created succesfully at {output_file}")
+
+def parse_genotype(format_col, vcf_df, samples_dict):
+    if 'GT' in format_col:
+        pos = format_col.index('GT')
+            # column storing the genotype
+        genotype_col = []
+        for values in samples_dict.values():
+            if len(values) > pos:
+                genotype_col.append(values[pos])
+        logger.debug(f"Genotype column are: {genotype_col}")
+        # get list of unique values for all genotype columns
+        genotype_values = vcf_df[genotype_col].apply(
+            lambda x: x.dropna().unique().tolist(), axis=0
+            ).iloc[:,0].tolist()
+        logger.debug(f"Genotype values are: {genotype_values}")
+        # genotype_values = genotype_values.to_lower()
+        GT_MAPPING = {"heterozygosis": "0/1", "homozygosis": "1/1", 
+                      "homozygosis_ref": "0/0","hemizygosis": "0/1",
+                      "hom_ref": "0/0", "hom_alt": "1/1", "het": "0/1",
+                      "ref": "0/0", "alt": "1/1", "Homozygous": "1/1",
+                      "Heterozygous": "0/1", "Homozygous_ref": "0/0",
+                      "Homozygous_alt": "1/1", "Homozygous_ref_": "0/0",
+                      "Homozygous_alt_": "1/1", "Homozygous_ref": "0/0",
+                      "Homozygous_alt": "1/1", "Heterozygous_": "0/1",
+                      "Heterozygous": "0/1", "Homozygous_ref_": "0/0",
+                      "Homozygosis": "1/1", "Homozygosis_ref": "0/0",
+                      "Homozygosis_alt": "1/1", "Heterozygosis": "0/1",}
+        if any(value.lower() not in GT_MAPPING.values() for value in genotype_values):
+            logger.debug(f"Converting {genotype_values} to {GT_MAPPING}")
+                # replace the values in the genotype_col using the provided dictionary mapping
+            for i, col in enumerate(genotype_col):
+                logger.debug(f"Column values are {vcf_df[col].unique()}")
+                vcf_df[col] = vcf_df[col].replace(GT_MAPPING)
+                logger.debug(f"Replaced {col} values with {GT_MAPPING}")
+                logger.debug(f"Column values are {vcf_df[col].unique()}")
+                # now replace anything else with ./.
+                # vcf_df[col] = vcf_df[col].replace(
+                #         {x: "./." for x in vcf_df[col].unique() if x not in GT_MAPPING.keys()}
+                #     )
+                logger.debug(f"Replaced {col} values with ./.if not in {GT_MAPPING.values()}")
+        return vcf_df
 
 def insert_sample_values(vcf_df, samples_dict, vcf_cols):
     """Insert sample values in the dataframe
