@@ -60,15 +60,16 @@ def enforce_col_types(data: pd.DataFrame):
 
 
 def check_columns_present(
-    df: pd.DataFrame, required_cols: list[str], required_are: int = 2
+    df: pd.DataFrame, required_cols: list[str], required_are: int = 2, column_mapping: list[str] = []
 ) -> list[str]:
     """
     Check columns are present in dataframe
     Args:
     - df
-    - required_columns
+    - required_columns DEFAULT: CHROM, POS, REF, ALT
     - required_are: posición de las columnas esenciales
     las que hacen saltar error
+    - column_mapping: map each column to the required columns
 
     Raises:
     - IndexError: Missing columns
@@ -76,7 +77,15 @@ def check_columns_present(
     Return:
     - Columns present in dataframe
     """
-    essentials = required_cols[:required_are]
+    if column_mapping:
+        # map columns to required columns
+        # transform list to dict splitting by ":" k:v and
+        column_mapping = [x.split(":") for x in column_mapping]
+        column_mapping = {x[0]:x[1] for x in column_mapping}
+        df.rename(columns=column_mapping, inplace=True)
+        logger.debug(f"Renamed columns {column_mapping} to {required_cols}")
+
+    essentials = ["CHROM", "POS", "REF", "ALT"]
     missing = [c for c in required_cols if c not in df.columns]
     present = [c for c in required_cols if c in df.columns]
     if any([x in missing for x in essentials]):
@@ -86,8 +95,7 @@ def check_columns_present(
         )
     elif missing:
         logger.warning(f"""The following columns are missing {missing}.
-The liftover coordinates will not be checked against
-REF-ALT lengths""")
+The liftover coordinates will not be checked against REF-ALT lengths""")
     enforce_col_types(df)
     logger.debug(present)
     return present
@@ -151,21 +159,38 @@ def lift_coords(
     return post_dict, error
 
 
-def save_errors(data: dict, show_err: bool, error: list):
-    """Save not lifted variants."""
-    if show_err and error:
-        err_path = "out/errors.txt"
-        cwd = os.getcwd()
-        os.mkdir(cwd + "out/") if not os.path.isdir("out/") else 0
-        logger.info(
-            f"Failed a total of {len(error)},\
-                    saving file in {err_path}"
-        )
-        with open(err_path, "w") as f:
-            f.write(f"{','.join(data)}\n")
-            for value in error:
-                f.write(f"{','.join(map(str, value))}\n")
-        logger.info(f"Error file saved at {err_path}")
+def save_errors(error: list, output_file: str):
+    """Save not lifted variants.
+    Args:
+    - error: list of errors
+    - output_file: path to save the errors"""
+    # create a log folder in the current directory
+    cwd = os.getcwd()
+    try:
+        os.mkdir(cwd + "/_log/")
+        logger.info(f"Directory {cwd + '/_log/'} created")
+    except FileExistsError:
+        logger.info(f"Directory {cwd + '/_log/'} already exists")
+    # rename error file to .err
+    # extract file name from path
+    err_file = os.path.basename(output_file)
+    err_path = os.path.join(cwd + "/_log/", f"{err_file}.err")
+    # check if file exists
+    if os.path.isfile(err_path):
+        logger.info(f"File {err_path} already exists, overwriting...")
+        os.remove(err_path)
+    logger.info(
+        f"Failed a total of {len(error)}, saving file to {err_path}"
+    )
+    with open(err_path, "w") as f:
+        try:
+            # write to file the error list
+            f.write(f"{','.join(error)}\n")
+        except TypeError as e:
+            logger.error(f"Error writing to error file: {e}")
+        for value in error:
+            f.write(f"{','.join(map(str, value))}\n")
+    logger.info(f"Error file saved at {err_path}")
 
 
 def create_dir(f):
@@ -188,7 +213,7 @@ def parse_format(format_col: str):
     for param in format_col_list:
         try:
             format_header = format_header + format_dict[param]
-            logger.info("Adding {param} to header")
+            logger.info(f"Adding {param} to header")
         except KeyError as e:
             logger.warning(
                 f"{param} not found in format dictionary, including a generic..."
@@ -260,6 +285,28 @@ def reorder_lifted_2(data: pd.DataFrame, new: str, old: str) -> pd.DataFrame:
 
     return data
 
+def parse_samples(samples: list, format: list) -> dict:
+    """Parse samples from list to dict
+    RETURNS:
+    - dict: {sample_name: sample_values (0/1:20)}
+    """
+    sample_dict = {}
+    for i,sample in enumerate(samples):
+        sample_name, sample_values_sep = sample.split(":")
+        sample_values = sample_values_sep.split("|")
+        if len(sample_values) != len(format.split(":")):
+            logger.error(
+                f"Sample {sample_name} has {len(sample_dict[sample_name])} values, \
+                but format has {len(format.split(':'))} values"
+            )
+            raise ValueError(
+                f"Sample {sample_name} has {len(sample_dict[sample_name])} values, \
+                but format has {len(format.split(':'))} values"
+            )
+        else:
+            sample_dict[sample_name] = sample_values
+    logger.info(f"Parsed samples to dictionary: {sample_dict}")
+    return sample_dict
 
 def write_as_vcf(
     data: pd.DataFrame,
@@ -269,6 +316,7 @@ def write_as_vcf(
     new_assembly: str,
     info_cols: str,
     format_col: str,
+    samples: list = [],
 ):
     """Parse dataframe and saves an vcf
 
@@ -287,17 +335,44 @@ def write_as_vcf(
 
     vcf_cols = ["CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO"]
     # INSERT COLUMNS
-    vcf_df.insert(2, "ID", ".")
-    vcf_df.insert(5, "QUAL", ".")
-    vcf_df.insert(6, "FILTER", "PASS")
-    vcf_df.insert(7, "INFO", ".")
-    if format_col:
-        vcf_df.insert(8, "FORMAT", format_col)  # not fine
-        logger.info(f"Added FORMAT field using column name = {format_col}")
-        vcf_cols.append("FORMAT")
-        # TODO: add one column per sample instead of including all in one column
-        vcf_cols.append("SAMPLES")  # fix
+    try:
+        vcf_df.insert(2, vcf_cols[2], ".")
+    except ValueError:
+        logger.warning("ID column already exists, using existing one")
+    try:
+        vcf_df.insert(5, vcf_cols[5], ".")
+    except ValueError:
+        logger.warning("QUAL column already exists, using existing one")
+    try:
+        vcf_df.insert(6, vcf_cols[6], "PASS")
+    except ValueError:
+        logger.warning("FILTER column already exists, using existing one")
+    try:
+        vcf_df.insert(7, vcf_cols[7], ".")
+    except ValueError:
+        logger.warning("INFO column already exists, using existing one")
 
+    if format_col and samples:
+        i = 8
+        vcf_df.insert(i, "FORMAT", format_col)  # not fine
+        vcf_cols.insert(i,"FORMAT")
+        logger.info(f"Added FORMAT field = {format_col}")
+        # append to list in given position
+        samples_dict = parse_samples(samples,format_col)
+        insert_sample_values(vcf_df, samples_dict, vcf_cols)
+    elif not format_col and samples:
+        logger.error(
+            "FORMAT column not specified")
+        raise ValueError("FORMAT column not specified. Use --format_column")
+    elif not samples and format_col:
+        logger.error(
+            "SAMPLE column not specified")
+        raise ValueError("SAMPLE column not specified. Use --samples")
+
+    len_cols = len(vcf_cols)
+    # reorder column to the right position, leeve the rest as is
+    vcf_df = vcf_df.reindex(columns=vcf_cols + vcf_df.columns[len_cols:].to_list())
+    logger.debug(f"Columns in vcf are {vcf_df.columns}")
     # CHANGE chr TODO
     vcf_df["CHROM"] = vcf_df["CHROM"].str.replace("chr", "")
     logger.info("Removing `chr` string from CHROM column")
@@ -313,34 +388,38 @@ def write_as_vcf(
     # info_index = colist.index('INFO')
     # logger.debug(f'INFO is in {info_index} and POS_hg38 is in {colist.index("POS_hg38")}')
     # add info_cols to new INFO field
-    nodropcols = ""
+    nondropcols = []
     if info_cols:
-        nodropcols = info_cols.split(",")
-        for i, column in enumerate(nodropcols):
+        logger.info(
+            f"Adding {info_cols} to INFO field.")
+
+        vcf_df["INFO"] = ""
+        nondropcols = info_cols.split(",")
+        for i, column in enumerate(nondropcols):
+            # convert to string TODO: review the type in the header and adjust accordingly instead of changing the type
+            vcf_df.loc[:, column] = vcf_df.loc[:, column].fillna(".").astype(str)
             # replace invalid characters
-            vcf_df.loc[:, column] = vcf_df.loc[:, column].str.replace(" ", "_")
+            vcf_df.loc[:, column] = vcf_df.loc[:, column].astype(str).str.replace(" ", "_")
             # vcf_df.loc[:, column] = vcf_df.loc[:, column].str.replace(':',',')
-            vcf_df.loc[:, column] = vcf_df.loc[:, column].str.replace(";", ",")
-            if i == 0:  # workaround..FIX
-                vcf_df.loc[:, "INFO"] = f"{column}=" + vcf_df.loc[:, column]
-            else:
-                vcf_df.loc[:, "INFO"] = (
-                    vcf_df.loc[:, "INFO"] + f";{column}=" + vcf_df.loc[:, column]
-                )
-    logger.debug(vcf_df.columns.to_list())
-    logger.debug(vcf_df.head())
-    # drop other columns (Non essential and not specified as info or format columns)
-    # add format values
-    if format_col:
-        nodropcols = nodropcols + [format_col, "SAMPLES"]
-        logger.debug(nodropcols)
-        vcf_df["SAMPLES"] = vcf_df.loc[:, format_col]
-        logger.info("Added SAMPLES field using format column values provided")
+            vcf_df.loc[:, column] = vcf_df.loc[:, column].astype(str).str.replace(";", ",")
+            if vcf_df.columns.duplicated().any():
+                # log wich columns are duplicated
+                logger.debug(f"Duplicated columns {vcf_df.columns[vcf_df.columns.duplicated()]}")
+                logger.warning(f"Duplicate column names detected. Removing duplicates.")
+                vcf_df = vcf_df.loc[:, ~vcf_df.columns.duplicated()]
+            vcf_df.loc[:, "INFO"] = (
+                vcf_df.loc[:, "INFO"] + f"{column}=" + vcf_df.loc[:, column] + ";"
+            )
+        # remove the last ";"
+        logger.debug(vcf_df["INFO"].head())
+        vcf_df["INFO"] = vcf_df.loc[:,"INFO"].astype(str).str[:-1]
+
+    logger.debug(f"Current columns in vcf are {vcf_df.columns.to_list()}")
 
     # ordering and dropping columns
     vcf_df = vcf_df[vcf_cols]
     logger.info(f"""Droping all columns but {vcf_df.columns}\n
-{nodropcols} included in INFO field""")
+{nondropcols} included in INFO field""")
 
     # sorting
     logger.debug(vcf_df.columns[:2])
@@ -348,7 +427,7 @@ def write_as_vcf(
         by=vcf_df.columns[:2].to_list(), key=natsort_keygen(), axis=0, inplace=True
     )
     logger.info("values sorted by CHROM and POS")
-
+    logger.info(f"Saving file to {output_file}")
     with open(output_file, "w") as f:
         f.write("""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed (placeholder)">
@@ -395,13 +474,37 @@ def write_as_vcf(
         f.write("#" + "\t".join(vcf_cols) + "\n")
         vcf_df.to_csv(f, sep="\t", index=False, header=False)
     logger.debug(vcf_df.shape[0])
-    logger.info("VCF file created succesfully")
+    logger.info(f"VCF file created succesfully at {output_file}")
+
+def insert_sample_values(vcf_df, samples_dict, vcf_cols):
+    """Insert sample values in the dataframe
+    Args:
+    - vcf_df: dataframe to insert values
+    - samples_dict: dictionary with sample names and values
+    - vcf_cols: columns in the dataframe
+    """
+    for sample,values in samples_dict.items():
+        vcf_df[sample] = ""
+        try:
+            vcf_df[sample] = vcf_df[values].apply(
+                    lambda x: ':'.join(x.dropna().astype(str)),
+                    axis=1
+                )
+            vcf_cols.append(sample)
+            logger.info(f"Added {sample} to dataframe")
+        except KeyError as e:
+            logger.error(f"Error processing {sample}: {e}")
+            raise KeyError(f"Error processing {sample}: {e}")
+    
+    return vcf_df,vcf_cols
 
 
 def lifto(
     data: str | pd.DataFrame,
     old: str = "hg19",
     new: str = "hg38",
+    column_mapping: list[str] = [],
+    samples: list[str] = [],
     one_based: bool = False,
     override_coords: bool = True,
     lift_end: bool = True,
@@ -421,6 +524,7 @@ def lifto(
     - data: path to csv file or dataframe
     - old: older assembly (def. hg19)
     - new: new assembly (def. hg38)
+    - column_mapping: map columns to required columns
     - one_based: 1-based (True) o 0-based start BUG
     - append_coords: Override existing coordinates
     - show_err: Show what variants could not be converted to stdout
@@ -430,7 +534,7 @@ def lifto(
     Returns:
     - pd.DataFrame | dict | None
     """
-
+    # read File if it's not a dataframe (dataframe processing should be deprecated)
     if isinstance(data, str):
         sep = "\t" if data.endswith(".tsv") else ","
         pre_data = pd.read_csv(data, header=0, sep=sep)
@@ -438,7 +542,10 @@ def lifto(
         pre_data = data
 
     columns = ["CHROM", "POS", "END", "REF", "ALT"]
-    present_cols = check_columns_present(pre_data, columns)
+    present_cols = check_columns_present(df=pre_data,
+                                         required_cols=columns,
+                                         required_are=4,
+                                         column_mapping=column_mapping)
     if present_cols == columns:
         check_coords(pre_data)
 
@@ -451,8 +558,8 @@ def lifto(
         f"Successfully converted: \
 {len(pre_data)} - {round(exito / total, 2) * 100} %."
     )
-
-    save_errors(result_dict, show_err, error)
+    if show_err and error:
+        save_errors(error, output_file)
 
     if output_file.endswith(("df", "csv", "vcf")):
         # dict to dataframe wo proper colnames
@@ -506,6 +613,7 @@ newcols={keys_as_cols + values_as_cols}"
                     override=override_coords,
                     info_cols=info_cols,
                     format_col=format_col,
+                    samples=samples,
                 )
             else:
                 result_merged.to_csv(output_file, index=False)
@@ -527,53 +635,67 @@ def argparsing(args: list[str] | None):
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--input", type=str, help="path to data")
-    parser.add_argument("--output", type=str, help="""""")
-    parser.add_argument("--old", type=str, help="assembly to convert", default="hg19")
-    parser.add_argument("--new", type=str, help="new assembly", default="hg38")
+    parser.add_argument("--output", type=str, help="Output file name")
+    parser.add_argument(
+        "--old", type=str, help="assembly to convert. Default=hg19", default="hg19"
+    )
+    parser.add_argument(
+        "--new", type=str, help="new assembly. Default=hg38", default="hg38"
+    )
+    parser.add_argument(
+        "--column_mapping",
+        type=str,
+        help="Map columns in data to required columns. \
+        Eg: --column_mapping CHROMOSOME:CHROM,POSITION:POS,REFERENCE:REF,ALT:ALT")
     parser.add_argument(
         "--one",
         type=bool,
-        help="""are the coordinates one based?
-Help:
-If an SNV has the same start and end is one based
-IF an insertion end = start+n_nucleotides is one_based
-                        Else is zero-based""",
+        help="""Are the coordinates one based? Help: If an SNV has the same start and end is one based IF an insertion end = start+n_nucleotides is one_based Else is zero-based""",
         default=False,
     )
     parser.add_argument(
         "--override_coords",
         action="store_true",
-        help="Do you want to override\
-the original coords?",
-        default=False,
+        help="Do you want to override the original coords?",
     )
-    parser.add_argument("--show_err", type=bool, help="print errors", default=False)
     parser.add_argument(
-        "--lift_end", type=bool, help="do you have end coord?", default=False
+        "--show_err", action="store_true", default=False, help="show errors"
+    )
+    parser.add_argument(
+        "--lift_end", action="store_true", help="do you have end coord?"
     )
     parser.add_argument(
         "--add_info_fields",
         type=str,
-        help="only if output is vcf.\
-Which columns do you want to include in the INFO field\
+        help="Only if the output is vcf. \
+Which columns do you want to include in the INFO field \
 Eg: --add_info_fields samplegenotype,quality will include these two columns",
     )
     parser.add_argument(
         "--format_column",
         type=str,
-        help="Indicate FORMAT field to use. Only for VCF output.",
+        help="Indicate FORMAT field to use. Only for VCF output. Eg: --format_column GT:GQ:DP",
     )
+    parser.add_argument(
+        "--samples",
+        type=str,
+        help="Sample name and values to use as the header of the SAMPLE field. Eg: --sample_name SAMPLE1:GT_colname|GQ_colname,SAMPLE2:GT_colname2|GQ_colname2. This column must have the same number of values for each sample as the --format_column.",
+    )
+    parser.add_argument("--logging_level", type=str, default="INFO", help="Logging level")
 
     return parser.parse_args(args)
 
 
 def main(args: list[str] | None):
     parser = argparsing(args)
-
+    # set logging level
+    logger.setLevel(getattr(logging, parser.logging_level.upper(), logging.INFO))
     lifto(
         data=parser.input,
         old=parser.old,
         new=parser.new,
+        column_mapping=parser.column_mapping.split(",") if parser.column_mapping else [],
+        samples=parser.samples.split(",") if parser.samples else [],
         override_coords=parser.override_coords,
         output_file=parser.output,
         show_err=parser.show_err,
