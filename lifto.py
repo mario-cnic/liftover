@@ -393,6 +393,9 @@ def write_as_vcf(
         nondropcols = info_cols.split(",")
         for i, column in enumerate(nondropcols):
             # convert to string TODO: review the type in the header and adjust accordingly instead of changing the type
+            if column not in vcf_df.columns:
+                logger.error(f"Column {column} not found in dataframe")
+                raise KeyError(f"Column {column} not found in dataframe")
             vcf_df.loc[:, column] = vcf_df.loc[:, column].fillna(".").astype(str)
             # replace invalid characters
             vcf_df.loc[:, column] = vcf_df.loc[:, column].astype(str).str.replace(" ", "_")
@@ -498,7 +501,8 @@ def parse_genotype(format_col, vcf_df, samples_dict):
                       "Heterozygous": "0/1", "Homozygous_ref_": "0/0",
                       "Homozygosis": "1/1", "Homozygosis_ref": "0/0",
                       "Homozygosis_alt": "1/1", "Heterozygosis": "0/1","Hemizygosis": "0/1",
-                      "Homozygosis_": "1/1"}
+                      "Homozygosis_": "1/1", "Other":'./.',"OTHER":'./.',"HETZ":'0/1',"HOMZ_REF":'0/0',
+                      "HOMZ_ALT":'1/1'}
         if any(value.lower() not in GT_MAPPING.values() for value in genotype_values):
             logger.debug(f"Converting {genotype_values} to {GT_MAPPING}")
                 # replace the values in the genotype_col using the provided dictionary mapping
