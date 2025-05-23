@@ -6,15 +6,36 @@ from typing import Literal
 import os
 import argparse
 from natsort import natsort_keygen
+import genebe as gnb
 
-# logging definition -> Maybe this goes to main(?)
+LOGGING_MAP = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+}
+
+# logging definition
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+# logger.setLevel(logging.DEBUG)
+formater = "%(asctime)s - %(module)s - %(levelname)s - %(message)s"
 # añadimos un handler para stdout
 c_handler = logging.StreamHandler(sys.stdout)
-c_format = logging.Formatter("%(name)s - %(levelname)s - %(message)s")
+c_format = logging.Formatter(formater)
 c_handler.setFormatter(c_format)
 logger.addHandler(c_handler)
+
+
+def file_logging(path: str = "_log/", filename: str = "generic"):
+    """add file handdler"""
+    if not os.path.exists(path):
+        print(path)
+        os.makedirs(path)
+    basen = os.path.basename(filename)
+    f_handler = logging.FileHandler(f"{path}/{basen}.log", mode="w")
+    f_handler.setFormatter(c_format)
+    logger.addHandler(f_handler)
+    logger.info(" ".join(sys.argv))
 
 
 ASSEMBLY = {"hg19": "GRCh37", "hg38": "GRCh38"}
@@ -100,9 +121,22 @@ The liftover coordinates will not be checked against REF-ALT lengths""")
     logger.debug(present)
     return present
 
+def lift_with_hgvs(data,hgvs_col):
+    """Convert using hgvs name if present
+    TODO: fix when gnb.parse_variants raises error"""
+    logger.info("Converting using only genebe and hgvs column specified")
+    hgvs_list = data[hgvs_col].to_list()
+    logger.debug(f"{hgvs_list}")
+    converted = gnb.parse_variants(hgvs_list)
+    logger.debug(f"{converted}")
+    lifted = [x.split("-") for x in converted]
+    return {
+        tuple(data.loc[i, ["CHROM", "POS", "REF", "ALT"]]): tuple(lifted[i])
+        for i in range(len(converted))
+    }
 
 def lift_coords(
-    pre_data: pd.DataFrame, lifter
+    pre_data: pd.DataFrame, lifter, hgvs_col: str = ""
 ) -> tuple[dict[tuple:tuple], list[tuple]]:
     """
     Iterates over a dataframe and lift the coordinates using `lifter` object
@@ -117,9 +151,14 @@ def lift_coords(
     is_ref_in_col = True if "REF" in pre_data.columns else False
     is_alt_in_col = True if "ALT" in pre_data.columns else False
     is_end_in_cols = True if "END" in pre_data.columns else False
-
+    is_hgvs_in_cols = True if hgvs_col in pre_data.columns else False
+    # if hgvs_col:
+    #     post_dict = lift_with_hgvs(pre_data, hgvs_col)
+        # logger.info(f"dictionary is {post_dict}")
     for _, row in pre_data.iterrows():
-        keys = tuple(row.loc[pre_data.columns].to_list())
+        # remove hgvs_col from keys
+        columns = [x for x in pre_data.columns.to_list() if x != hgvs_col]
+        keys = tuple(row.loc[columns].to_list())
         try:
             chrom, pos = lifter.convert_coordinate(str(row.CHROM), row.POS)[0][:2]
             if is_end_in_cols:
@@ -127,7 +166,11 @@ def lift_coords(
             else:
                 end = 0
             if is_ref_in_col:
+                if not row.REF:
+                    row.REF = '.'
                 if is_alt_in_col:
+                    if not row.ALT:
+                        row.ALT = '.'
                     post_dict[keys] = (
                         (chrom, pos, end, row.REF, row.ALT)
                         if is_end_in_cols
@@ -140,6 +183,8 @@ def lift_coords(
                         else (chrom, pos, row.REF)
                     )
             elif is_alt_in_col:
+                if not row.ALT:
+                    row.ALT = '.'
                 post_dict[keys] = (
                     (chrom, pos, end, row.ALT)
                     if is_end_in_cols
@@ -148,14 +193,37 @@ def lift_coords(
             else:
                 post_dict[keys] = (chrom, pos, end) if end != 0 else (chrom, pos)
             # logger.debug(f'{chrom}:{row.POS}- new:{pos}')
+            if row.REF == '.' and row.ALT == '.':
+                logger.warning(f"REF and ALT columns are blank for {keys}")
+                if is_hgvs_in_cols:
+                    logger.warning(f"->{hgvs}")
         except IndexError:
-            error.append(tuple(keys))
-            n = n + 1
+            # logger.warning(f"IndexError with variant {row.CHROM}:{row.POS}")
+            if is_hgvs_in_cols:
+                # try to get the hgvs name from the column
+                hgvs = row[hgvs_col]
+                # logger.info(f"Using genebe to parse the hgvs name {hgvs} into hg38")
+                # for this row, parse the hgvs name
+                logger.debug(f"Converting {hgvs} using genebe")
+                gnb_var = gnb.parse_variants([hgvs])
+                if gnb_var:
+                    gnb_result = gnb_var[0].split("-")
+                    if gnb_result[0] != '':
+                        post_dict[keys] = tuple(gnb_result)
+                        logger.info(f"Genebe parsed {keys} - {gnb_result}")
+                    else:
+                        logger.warning(f"Genebe could not parse {hgvs} - {row.CHROM}:{row.POS}")
+                        error.append(tuple(keys))   
+                        n = n + 1
+                else:
+                    logger.warning(f"Genebe could not parse {hgvs} - {row.CHROM}:{row.POS}")
+                    error.append(tuple(keys))
         except KeyError:
             error.append(tuple(keys))
             logger.debug(f"Error processing {row.CHROM}, jumping next...")
             n = n + 1
-    # logger.debug(post_dict)
+        # logger.debug(f"Post dict is {post_dict[keys]}")
+
     return post_dict, error
 
 
@@ -324,7 +392,7 @@ def write_as_vcf(
     - new_assembly: liftover target assembly, only used if `override`=TRUE
     TODO: sort and compress (bgzip)
     """
-
+    logger.debug(f"Dataframe shape is {data.shape} at the start of write_as_vcf")
     vcf_df = data.drop(columns={"END"}, inplace=False, errors="ignore")  # type:pd.DataFrame
     vcf_df = vcf_df.drop(columns={"END_hg38"}, inplace=False, errors="ignore")  # type:pd.DataFrame
 
@@ -414,12 +482,12 @@ def write_as_vcf(
         vcf_df["INFO"] = vcf_df.loc[:,"INFO"].astype(str).str[:-1]
 
     logger.debug(f"Current columns in vcf are {vcf_df.columns.to_list()}")
-
     # ordering and dropping columns
     vcf_df = vcf_df[vcf_cols]
     logger.debug(f"""Droping all columns but {vcf_df.columns}\n
 {nondropcols} included in INFO field""")
 
+    logger.debug(f"Current shape [write_vcf] is {vcf_df.shape}")
     # sorting
     logger.debug(vcf_df.columns[:2])
     vcf_df.sort_values(
@@ -471,6 +539,7 @@ def write_as_vcf(
             f.write(format_header)
             logger.info("FORMAT field added to HEADER")
         f.write("#" + "\t".join(vcf_cols) + "\n")
+        logger.debug(f"First values are {vcf_df.head()}")
         vcf_df.to_csv(f, sep="\t", index=False, header=False)
     logger.debug(vcf_df.shape[0])
     logger.info(f"VCF file created succesfully at {output_file}")
@@ -549,6 +618,7 @@ def lifto(
     samples: list[str] = [],
     one_based: bool = False,
     override_coords: bool = True,
+    hgvs_col: str = "",
     lift_end: bool = True,
     show_err: bool = False,
     output_file: Literal["dict", "df", "csv"] = "df",
@@ -590,10 +660,18 @@ def lifto(
                                          column_mapping=column_mapping)
     if present_cols == columns:
         check_coords(pre_data)
-
+    logger.info(f"Converting coordinates from {old} to {new}")
     lifter = get_lifter(old, new, one_based=one_based)
-    result_dict, error = lift_coords(pre_data.loc[:, present_cols], lifter)
-    logger.debug(list(result_dict.values())[:2])
+    if hgvs_col:
+        # check if hgvs_col is in data
+        if hgvs_col not in pre_data.columns:
+            logger.error(f"HGVS column {hgvs_col} not found in dataframe")
+            raise KeyError(f"HGVS column {hgvs_col} not found in dataframe")
+        present_cols.append(hgvs_col)
+    result_dict, error = lift_coords(pre_data.loc[:, present_cols], lifter=lifter,hgvs_col=hgvs_col)
+    # remove hgvs_col from present_cols if present_cols[-1] == hgvs_col:
+    if hgvs_col and present_cols[-1] == hgvs_col:
+        present_cols.pop(-1)
     total = pre_data.shape[0]
     exito = len(result_dict)
     logger.info(
@@ -611,6 +689,7 @@ def lifto(
         keys_as_cols = present_cols
         values_as_cols = [f"{x}_{new}" for x in present_cols]
         logger.debug(f"{keys_as_cols}\n{values_as_cols}")
+        logger.debug(f"Result shape is {result.shape}")
         # set colnames hg19coord_names + hg38coords_names
         try:
             result.columns = keys_as_cols + values_as_cols
@@ -641,12 +720,15 @@ newcols={keys_as_cols + values_as_cols}"
             # change colnames from CHROM_hgXX to CHROM
             # result_merged.columns = map(lambda x: x.replace(f'_{new}', ''),
             #                             result_merged.columns.to_list())
+            logger.debug(f"Shape in result_merged are {result_merged.shape}")
 
         if output_file.endswith("df"):
             return result_merged
         else:
             create_dir(output_file)
             if output_file.endswith("vcf"):
+                logger.debug(f"Result merged is {result_merged.head()}")
+                logger.debug(f"Result merged shape is {result_merged.shape}")
                 write_as_vcf(
                     data=result_merged,
                     output_file=output_file,
@@ -719,6 +801,13 @@ Eg: --add_info_fields samplegenotype,quality will include these two columns",
         help="Indicate FORMAT field to use. Only for VCF output. Eg: --format_column GT:GQ:DP",
     )
     parser.add_argument(
+        "--hgvs_col",
+        type=str,
+        help="HGVS column to use if the liftover fails. \
+        This column must be present in the input file",
+        default="",
+    )
+    parser.add_argument(
         "--samples",
         type=str,
         help="Sample name and values to use as the header of the SAMPLE field. Eg: --sample_name SAMPLE1:GT_colname|GQ_colname,SAMPLE2:GT_colname2|GQ_colname2. This column must have the same number of values for each sample as the --format_column.",
@@ -730,14 +819,16 @@ Eg: --add_info_fields samplegenotype,quality will include these two columns",
 
 def main(args: list[str] | None):
     parser = argparsing(args)
+    file_logging("_log/",parser.output)
     # set logging level
-    logger.setLevel(getattr(logging, parser.logging_level.upper(), logging.INFO))
+    logger.setLevel(LOGGING_MAP[parser.logging_level])
     lifto(
         data=parser.input,
         old=parser.old,
         new=parser.new,
         column_mapping=parser.column_mapping.split(",") if parser.column_mapping else [],
         samples=parser.samples.split(",") if parser.samples else [],
+        hgvs_col=parser.hgvs_col,
         override_coords=parser.override_coords,
         output_file=parser.output,
         show_err=parser.show_err,
@@ -745,7 +836,6 @@ def main(args: list[str] | None):
         info_cols=parser.add_info_fields,
         format_col=parser.format_column,
     )
-
 
 if __name__ == "__main__":
     main(None)
